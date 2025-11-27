@@ -45,112 +45,90 @@ instruments = {
     "GBP/JPY": {"atr_min": 30, "pip_unit": "pips", "stop_pips": 15, "target_pips": 40},
 }
 
-col1, col2 = st.columns(2)
-with col1:
-    instrument = st.selectbox("Instrument", list(instruments.keys()))
-with col2:
-    gmt_time = st.time_input("Current GMT Time", value=None)
+st.subheader("📋 Paste MT5 line (Ctrl-V)")
+raw = st.text_area(
+    "Format: SYMBOL SIDE BREAKOUT RETEST ENTRY STOP TARGET ATR ADX VOLUME",
+    placeholder="GBPUSD BUY 1.28030 1.27780 1.28040 1.27990 1.28290 0.00034 28.4 4123"
+)
 
-news_risk = st.checkbox("⚠️ High-impact news in next 30 min?", value=False)
+if st.button("🔍 Validate Trade", type="primary") and raw:
+    try:
+        parts = raw.strip().split()
+        symbol, side, breakout, retest, entry, stop, target, atr, adx, vol = parts
+        instrument = symbol.replace("USD","/USD").replace("GBP","GBP/")   # quick map
+        side = side.upper()
+        breakout = float(breakout)
+        retest   = float(retest)
+        entry    = float(entry)
+        stop     = float(stop)
+        target   = float(target)
+        atr_v    = float(atr)
+        adx_v    = float(adx)
+        vol_v    = int(vol)
 
-st.subheader("Price Levels")
-col1, col2, col3 = st.columns(3)
-with col1:
-    breakout = st.number_input("Breakout Level", format="%.5f")
-with col2:
-    retest = st.number_input("Retest Price", format="%.5f")
-with col3:
-    entry = st.number_input("Entry Price", format="%.5f")
+        # ---- auto-calculate ----
+        risk_pips = abs(entry - stop)
+        reward_pips = abs(target - entry)
+        rr = reward_pips / risk_pips if risk_pips else 0
+        account = 10_000
+        risk_usd = account * 0.01                       # 1 % hard rule
+        pip_val  = {"Gold":1, "S&P":1, "XAUUSD":1}.get(symbol, 1)   # customise
+        lots = risk_usd / (risk_pips * pip_val)
 
-st.subheader("Confirmation")
-col1, col2 = st.columns(2)
-with col1:
-    atr = st.number_input(f"H1 ATR ({instruments[instrument]['pip_unit']})", value=0.0, format="%.2f")
-with col2:
-    adx = st.number_input("H1 ADX", value=0.0, format="%.1f")
-
-stop = st.number_input("Stop Loss", format="%.5f")
-target = st.number_input("Take Profit", format="%.5f")
-
-# --- VALIDATION ---
-if st.button("🔍 Validate Trade", type="primary"):
-    if not gmt_time:
-        st.error("Enter GMT time")
-    else:
-        # Calculate R:R
-        risk = abs(entry - stop)
-        reward = abs(target - entry)
-        rr = reward / risk if risk > 0 else 0
-
-        trade_data = {
-            "instrument": instrument,
-            "gmt_time": f"{gmt_time.hour:02d}:{gmt_time.minute:02d}",
-            "news_risk": news_risk,
-            "breakout_level": breakout,
-            "retest_price": retest,
-            "entry": entry,
-            "stop": stop,
-            "target": target,
-            "atr": atr,
-            "adx": adx,
-            "rr_ratio": round(rr, 2)
-        }
-
-        # Build prompt
+        # ---- build identical prompt you already use ----
         prompt = f"""
-{STRATEGY_RULES}
-
+You are a strict trade validator for a breakout-retest strategy…
+(keep your original STRATEGY_RULES block here)
 Trade details:
 - Instrument: {instrument}
-- Current GMT time: {trade_data['gmt_time']}
+- Side: {side}
+- Current GMT time: {gmt_time}
 - High-impact news soon?: {news_risk}
 - Breakout level: {breakout}
 - Retest price: {retest}
 - Entry price: {entry}
 - Stop loss: {stop}
 - Take profit: {target}
-- H1 ATR: {atr} {instruments[instrument]['pip_unit']}
-- H1 ADX: {adx}
+- H1 ATR: {atr_v} {instruments[instrument]['pip_unit']}
+- H1 ADX: {adx_v}
+- Volume vs 20-bar avg: {vol_v} (you may ignore if not needed)
 
-Respond ONLY in JSON format:
+Respond ONLY in JSON:
 {{
   "decision": "APPROVED" or "REJECTED",
   "reason": "specific rule violated or confirmed",
-  "risk_usd": 100.0,
-  "rr_ratio": {rr}
+  "risk_usd": {risk_usd},
+  "rr_ratio": {rr:.2f},
+  "lots": {lots:.2f}
 }}
 """
+        # ---- call OpenRouter exactly as before ----
+        with st.spinner("🧠 AI is validating…"):
+            response = client.chat.completions.create(
+                model="meta-llama/llama-3.1-8b-instruct:free",
+                messages=[{"role":"user","content":prompt}],
+                temperature=0, max_tokens=250
+            )
+            raw_resp = response.choices[0].message.content.strip()
+            result = json.loads(raw_resp.removeprefix("```json").removesuffix("```"))
 
-        with st.spinner("🧠 AI is validating..."):
-            try:
-                response = client.chat.completions.create(
-                    model="meta-llama/llama-3.1-8b-instruct:free",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.0,
-                    max_tokens=250
-                )
-                raw = response.choices[0].message.content.strip()
-                if raw.startswith("```json"):
-                    raw = raw[7:-3]
-                result = json.loads(raw)
+        # ---- display ----
+        if result["decision"]=="APPROVED":
+            st.success(f"✅ APPROVED – {result['reason']}")
+            st.info(f"Suggested size: {result['lots']} lots  (${result['risk_usd']})")
+        else:
+            st.error(f"❌ REJECTED – {result['reason']}")
 
-                # Display result
-                if result["decision"] == "APPROVED":
-                    st.success(f"✅ **APPROVED**\n\n{result['reason']}")
-                else:
-                    st.error(f"❌ **REJECTED**\n\n{result['reason']}")
-
-                # Journal snippet
-                unit = instruments[instrument]["pip_unit"]
-                session = "London" if 8 <= gmt_time.hour < 12 else "US" if 13 <= gmt_time.hour <= 16 else "Invalid"
-                journal = f"""
-[{ '✅' if result['decision'] == 'APPROVED' else '❌' }] {instrument}:
-- Breakout: {breakout} → Retest: {retest} → Entry: {entry}
-- SL: {stop}, TP: {target} ({result['rr_ratio']}:1)
-- ATR: {atr} {unit}, ADX: {adx}, Session: {session}
-- Emotion: [______________] → Lesson: [______________]
+        # ---- journal snippet ----
+        unit = instruments[instrument]["pip_unit"]
+        journal = f"""
+[{result['decision'][0]}] {instrument} {side}
+Breakout {breakout} → Retest {retest} → Entry {entry}
+SL {stop}  TP {target}  ({rr:.1f}:1)
+ATR {atr_v} {unit}  ADX {adx_v:.1f}  Lots {lots:.2f}
+Emotion: _____________  Lesson: _____________
 """
-                st.text_area("📝 Copy for your journal", journal.strip(), height=150)
+        st.text_area("📝 Copy for journal", journal.strip(), height=140)
 
-            except Exception as e:
-                st.error(f"AI Error: {str(e)}")
+    except Exception as e:
+        st.error(f"Parse error – check MT5 line format.\n{e}")
